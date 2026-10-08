@@ -50,27 +50,31 @@ class OnboardingService:
 
     async def register(self, data: RegisterHospitalRequest) -> Hospital:
         email = data.email.lower()
-        if await self.uow.users.get_by_email(email) or await self.uow.users.get_by_username(email):
-            raise EmailAlreadyRegisteredError
-
-        hospital = await self.uow.hospitals.add(
-            Hospital(
-                name=data.hospital_name,
-                city=data.city,
-                contact_name=data.contact_name,
-                contact_phone=data.phone,
-                status=HospitalStatus.PENDING_VERIFICATION,
-            )
+        existing = await self.uow.users.get_by_email(email) or await self.uow.users.get_by_username(
+            email
         )
-        user = await self.uow.users.add(
-            User(
-                username=email,
-                email=email,
-                password_hash=hash_password(data.password),
-                role=UserRole.HOSPITAL_ADMIN,
-                hospital_id=hospital.id,
+        if existing is not None:
+            hospital = await self._take_over_unverified(existing, data)
+            user = existing
+        else:
+            hospital = await self.uow.hospitals.add(
+                Hospital(
+                    name=data.hospital_name,
+                    city=data.city,
+                    contact_name=data.contact_name,
+                    contact_phone=data.phone,
+                    status=HospitalStatus.PENDING_VERIFICATION,
+                )
             )
-        )
+            user = await self.uow.users.add(
+                User(
+                    username=email,
+                    email=email,
+                    password_hash=hash_password(data.password),
+                    role=UserRole.HOSPITAL_ADMIN,
+                    hospital_id=hospital.id,
+                )
+            )
         await self._send_new_code(user, hospital.name)
         # Commit only after the email went out: if sending fails, nothing is saved and the
         # applicant can simply submit the form again.
@@ -78,6 +82,29 @@ class OnboardingService:
             await self.uow.commit()
         except IntegrityError:  # same email registered concurrently
             raise EmailAlreadyRegisteredError from None
+        return hospital
+
+    async def _take_over_unverified(self, user: User, data: RegisterHospitalRequest) -> Hospital:
+        """Re-registering an email that was never verified replaces the old details.
+
+        Otherwise anyone could block a hospital by registering its email first and never
+        verifying it. This is safe: only the inbox owner can complete verification.
+        """
+        hospital = await self.uow.hospitals.get_by_id(user.hospital_id)
+        if (
+            user.role != UserRole.HOSPITAL_ADMIN
+            or user.email_verified_at is not None
+            or hospital is None
+            or hospital.status != HospitalStatus.PENDING_VERIFICATION
+        ):
+            raise EmailAlreadyRegisteredError
+        await self._check_resend_cooldown(user)  # no inbox spamming via repeated registration
+
+        hospital.name = data.hospital_name
+        hospital.city = data.city
+        hospital.contact_name = data.contact_name
+        hospital.contact_phone = data.phone
+        user.password_hash = hash_password(data.password)
         return hospital
 
     async def verify_email(self, email: str, code: str) -> None:
@@ -112,16 +139,19 @@ class OnboardingService:
         if user is None or user.role != UserRole.HOSPITAL_ADMIN or user.email_verified_at:
             return
 
-        latest = await self.uow.email_verifications.get_latest_for_user(user.id)
-        if latest is not None:
-            elapsed = (utcnow() - latest.created_at).total_seconds()
-            cooldown = self.settings.verification_resend_cooldown_seconds
-            if elapsed < cooldown:
-                raise ResendTooSoonError(int(cooldown - elapsed) + 1)
-
+        await self._check_resend_cooldown(user)
         hospital = await self.uow.hospitals.get_by_id(user.hospital_id)
         await self._send_new_code(user, hospital.name if hospital else "your hospital")
         await self.uow.commit()
+
+    async def _check_resend_cooldown(self, user: User) -> None:
+        latest = await self.uow.email_verifications.get_latest_for_user(user.id)
+        if latest is None:
+            return
+        elapsed = (utcnow() - latest.created_at).total_seconds()
+        cooldown = self.settings.verification_resend_cooldown_seconds
+        if elapsed < cooldown:
+            raise ResendTooSoonError(int(cooldown - elapsed) + 1)
 
     async def _send_new_code(self, user: User, hospital_name: str) -> None:
         assert user.email is not None

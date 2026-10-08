@@ -28,6 +28,14 @@ _email_failed = HTTPException(
 )
 
 
+def _too_soon(exc: ResendTooSoonError) -> HTTPException:
+    return HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        f"Wait {exc.retry_after_seconds} seconds before sending another code.",
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
     body: RegisterHospitalRequest, onboarding: OnboardingServiceDep
@@ -39,6 +47,8 @@ async def register(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists. Sign in instead.",
         ) from None
+    except ResendTooSoonError as exc:
+        raise _too_soon(exc) from None
     except EmailDeliveryError:
         logger.exception("Verification email failed during registration")
         raise _email_failed from None
@@ -66,11 +76,7 @@ async def resend_code(body: ResendCodeRequest, onboarding: OnboardingServiceDep)
     try:
         await onboarding.resend_code(body.email)
     except ResendTooSoonError as exc:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"Wait {exc.retry_after_seconds} seconds before sending another code.",
-            headers={"Retry-After": str(exc.retry_after_seconds)},
-        ) from None
+        raise _too_soon(exc) from None
     except EmailDeliveryError:
         logger.exception("Verification email failed during resend")
         raise _email_failed from None

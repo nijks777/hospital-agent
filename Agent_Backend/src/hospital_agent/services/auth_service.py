@@ -45,8 +45,16 @@ class AuthService:
         return user, create_access_token(user.id, user.role, self.settings)
 
     async def get_active_user(self, user_id: uuid.UUID) -> User | None:
+        """Checked on every authenticated request, not just at login: suspending a user or
+        their hospital takes effect immediately, even though their token is still valid."""
         user = await self.uow.users.get_by_id(user_id)
-        return user if user and user.is_active else None
+        if user is None or not user.is_active:
+            return None
+        if user.role == UserRole.HOSPITAL_ADMIN:
+            hospital = await self.uow.hospitals.get_by_id(user.hospital_id)
+            if hospital is None or hospital.status != HospitalStatus.ACTIVE:
+                return None
+        return user
 
     async def create_platform_admin(self, username: str, password: str) -> User:
         username = username.strip().lower()

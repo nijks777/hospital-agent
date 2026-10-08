@@ -175,3 +175,14 @@ def test_wrong_password_for_pending_hospital_still_says_incorrect() -> None:
     response = client.post("/auth/login", json={"username": "admin@citycare.in", "password": "x"})
 
     assert response.status_code == 401
+
+
+def test_existing_session_stops_working_when_hospital_is_suspended() -> None:
+    user, hospital = make_hospital_admin(HospitalStatus.ACTIVE)
+    client = make_client(user, hospitals=(hospital,))
+    client.post("/auth/login", json={"username": "admin@citycare.in", "password": PASSWORD})
+    assert client.get("/auth/me").status_code == 200
+
+    hospital.transition_to(HospitalStatus.SUSPENDED)
+
+    assert client.get("/auth/me").status_code == 401

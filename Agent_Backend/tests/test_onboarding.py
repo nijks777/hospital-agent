@@ -74,15 +74,6 @@ def test_register_does_not_save_when_email_fails() -> None:
     assert h.uow.commits == 0
 
 
-def test_register_rejects_duplicate_email() -> None:
-    h = Harness()
-    h.register()
-
-    response = h.client.post("/onboarding/register", json=FORM)
-
-    assert response.status_code == 409
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     [("email", "not-an-email"), ("phone", "abc"), ("password", "short"), ("city", " ")],
@@ -173,3 +164,41 @@ def test_status_machine_blocks_invalid_moves() -> None:
 
     with pytest.raises(InvalidStatusTransitionError):
         hospital.transition_to(HospitalStatus.ACTIVE)
+
+
+def test_unverified_email_can_be_registered_again_after_cooldown() -> None:
+    h = Harness()
+    h.register()  # e.g. a squatter who never verifies
+    h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
+
+    response = h.client.post(
+        "/onboarding/register",
+        json={**FORM, "hospital_name": "Real Hospital", "password": "x" * 10},
+    )
+
+    assert response.status_code == 201
+    assert len(h.uow.hospitals.rows) == 1 and len(h.uow.users.rows) == 1  # replaced, not duplicated
+    assert h.hospital.name == "Real Hospital"
+    assert h.verify(h.email.last_code()) == 204  # the inbox owner completes it
+
+
+def test_reregistering_unverified_email_respects_cooldown() -> None:
+    h = Harness()
+    h.register()
+
+    response = h.client.post("/onboarding/register", json=FORM)
+
+    assert response.status_code == 429
+    assert len(h.email.sent) == 1
+
+
+def test_verified_email_cannot_be_registered_again() -> None:
+    h = Harness()
+    h.register()
+    h.verify(h.email.last_code())
+    h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
+
+    response = h.client.post("/onboarding/register", json=FORM)
+
+    assert response.status_code == 409
+    assert h.hospital.status == HospitalStatus.PENDING_REVIEW
