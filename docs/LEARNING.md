@@ -167,3 +167,28 @@ Revision notes for interviews. One entry per step, newest last.
   unverifiable account ("email already exists"). Send first, then commit → failure leaves no trace.
 - *Why a separate, unlisted superadmin login?* Smaller attack surface and clearer UX; but security comes from the
   role check on the server, never from hiding the URL.
+
+---
+
+## Step 2a-fix — Three security bugs found by review (and how each fix created the next)
+
+1. **Account squatting**: anyone could register a hospital's email first and never verify → real owner blocked
+   with "email already exists". Fix: an *unverified* registration can be replaced by registering again
+   (with the 60 s cooldown so it can't spam the inbox).
+2. **Stale session after suspension**: hospital status was checked only at login; a suspended hospital's JWT
+   kept working for 8 h. Fix: check user + hospital status on **every** request (`get_active_user`).
+3. **Account takeover introduced by fix 1**: attacker re-registers victim's pending email with *their* password;
+   the new code goes to the victim, who types it in → verified with the attacker's password.
+   Fix: each registration gets a random **registration token** (returned to that browser, stored as HMAC on
+   the code row). Verify/resend need **code + token** — the attacker has the token but not the inbox; the
+   victim has the inbox but not the attacker's token.
+
+**Lesson**: a security fix changes the threat model — re-review it as new code. Binding a secret to the
+*session that requested it* (like OAuth's `state` / PKCE) stops "someone else completes my flow" attacks.
+
+**Interview Q&A**
+- *How do you stop someone squatting on an email during sign-up?* Unverified = unowned; allow takeover of
+  unverified sign-ups, but bind the verification to the requesting session so the takeover can't be completed
+  by tricking the inbox owner.
+- *What's the cost of stateless JWTs?* Revocation. We re-check the DB on every request (cheap here); alternatives
+  are short expiry + refresh tokens or a token version column.
