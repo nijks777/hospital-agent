@@ -1,0 +1,5 @@
+{
+  "venvPath": "Agent_Backend",
+  "venv": ".venv",
+  "include": ["Agent_Backend/src", "Agent_Backend/tests"]
+}

@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ward: #f3f6f5; /* page background: cool clinical white */
+  --color-surface: #ffffff;
+  --color-scrub: #0e3b36; /* sidebar, brand */
+  --color-scrub-soft: #1a4d47;
+  --color-ink: #1b2624; /* body text */
+  --color-muted: #5d6b68;
+  --color-line: #dce3e1;
+  --color-saline: #1f5fbf; /* actions, focus */
+  --color-saline-dark: #184c99;
+  --color-pending: #a86a12;
+  --color-active: #2d7a4f;
+  --color-halt: #b03a3a;
+
+  --font-sans: var(--font-public-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-ward);
+  color: var(--color-ink);
+  font-feature-settings: "tnum" 1; /* aligned numbers in tables and stats */
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-saline);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
