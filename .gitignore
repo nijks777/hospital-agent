@@ -20,3 +20,6 @@ out/
 .DS_Store
 .vscode/
 .idea/
+
+# Personal Claude Code settings
+.claude/settings.local.json
