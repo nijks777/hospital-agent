@@ -4,10 +4,11 @@ from sqlalchemy.exc import IntegrityError
 
 from hospital_agent.core.config import Settings
 from hospital_agent.core.security import (
+    generate_registration_token,
     generate_verification_code,
     hash_password,
-    hash_verification_code,
-    verification_code_matches,
+    keyed_hash,
+    keyed_hash_matches,
 )
 from hospital_agent.db.unit_of_work import UnitOfWork
 from hospital_agent.integrations.email.port import EmailMessage, EmailSender
@@ -30,6 +31,10 @@ class CodeExpiredError(Exception):
     pass
 
 
+class RegistrationSupersededError(Exception):
+    """The email was registered again from elsewhere; this registration can't be verified."""
+
+
 class TooManyAttemptsError(Exception):
     pass
 
@@ -48,7 +53,8 @@ class OnboardingService:
         self.email = email
         self.settings = settings
 
-    async def register(self, data: RegisterHospitalRequest) -> Hospital:
+    async def register(self, data: RegisterHospitalRequest) -> tuple[Hospital, str]:
+        """Returns the hospital and a registration token the caller must present to verify."""
         email = data.email.lower()
         existing = await self.uow.users.get_by_email(email) or await self.uow.users.get_by_username(
             email
@@ -75,20 +81,22 @@ class OnboardingService:
                     hospital_id=hospital.id,
                 )
             )
-        await self._send_new_code(user, hospital.name)
+        token = generate_registration_token()
+        await self._send_new_code(user, hospital.name, keyed_hash(token, self.settings))
         # Commit only after the email went out: if sending fails, nothing is saved and the
         # applicant can simply submit the form again.
         try:
             await self.uow.commit()
         except IntegrityError:  # same email registered concurrently
             raise EmailAlreadyRegisteredError from None
-        return hospital
+        return hospital, token
 
     async def _take_over_unverified(self, user: User, data: RegisterHospitalRequest) -> Hospital:
         """Re-registering an email that was never verified replaces the old details.
 
         Otherwise anyone could block a hospital by registering its email first and never
-        verifying it. This is safe: only the inbox owner can complete verification.
+        verifying it. Safe because the new code is bound to the new registration token: the
+        earlier registrant's token stops working, and the new registrant can't read the inbox.
         """
         hospital = await self.uow.hospitals.get_by_id(user.hospital_id)
         if (
@@ -107,7 +115,7 @@ class OnboardingService:
         user.password_hash = hash_password(data.password)
         return hospital
 
-    async def verify_email(self, email: str, code: str) -> None:
+    async def verify_email(self, email: str, code: str, registration_token: str) -> None:
         user = await self.uow.users.get_by_email(email.lower())
         if user is None or user.role != UserRole.HOSPITAL_ADMIN:
             raise InvalidCodeError
@@ -120,7 +128,12 @@ class OnboardingService:
             raise CodeExpiredError
         if verification.attempts >= self.settings.verification_max_attempts:
             raise TooManyAttemptsError
-        if not verification_code_matches(code, verification.code_hash, self.settings):
+        if not keyed_hash_matches(
+            registration_token, verification.registration_token_hash, self.settings
+        ):
+            # A newer registration replaced this one; this browser's signup is no longer valid.
+            raise RegistrationSupersededError
+        if not keyed_hash_matches(code, verification.code_hash, self.settings):
             verification.attempts += 1
             await self.uow.commit()
             raise InvalidCodeError
@@ -133,15 +146,23 @@ class OnboardingService:
         hospital.transition_to(HospitalStatus.PENDING_REVIEW)
         await self.uow.commit()
 
-    async def resend_code(self, email: str) -> None:
-        """Silently does nothing for unknown or already-verified emails (no account probing)."""
+    async def resend_code(self, email: str, registration_token: str) -> None:
+        """Silently does nothing unless this browser owns the current registration
+        (no account probing, no resending for someone else's signup)."""
         user = await self.uow.users.get_by_email(email.lower())
         if user is None or user.role != UserRole.HOSPITAL_ADMIN or user.email_verified_at:
+            return
+        latest = await self.uow.email_verifications.get_latest_for_user(user.id)
+        if latest is None or not keyed_hash_matches(
+            registration_token, latest.registration_token_hash, self.settings
+        ):
             return
 
         await self._check_resend_cooldown(user)
         hospital = await self.uow.hospitals.get_by_id(user.hospital_id)
-        await self._send_new_code(user, hospital.name if hospital else "your hospital")
+        await self._send_new_code(
+            user, hospital.name if hospital else "your hospital", latest.registration_token_hash
+        )
         await self.uow.commit()
 
     async def _check_resend_cooldown(self, user: User) -> None:
@@ -153,14 +174,17 @@ class OnboardingService:
         if elapsed < cooldown:
             raise ResendTooSoonError(int(cooldown - elapsed) + 1)
 
-    async def _send_new_code(self, user: User, hospital_name: str) -> None:
+    async def _send_new_code(
+        self, user: User, hospital_name: str, registration_token_hash: str
+    ) -> None:
         assert user.email is not None
         code = generate_verification_code()
         ttl = self.settings.verification_code_ttl_minutes
         await self.uow.email_verifications.add(
             EmailVerification(
                 user_id=user.id,
-                code_hash=hash_verification_code(code, self.settings),
+                code_hash=keyed_hash(code, self.settings),
+                registration_token_hash=registration_token_hash,
                 expires_at=utcnow() + timedelta(minutes=ttl),
             )
         )

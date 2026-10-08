@@ -49,10 +49,18 @@ def generate_verification_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def hash_verification_code(code: str, settings: Settings) -> str:
-    # HMAC with a server secret: a leaked DB row can't be brute-forced offline (only 10^6 codes).
-    return hmac.new(settings.jwt_secret_key.encode(), code.encode(), hashlib.sha256).hexdigest()
+def generate_registration_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
-def verification_code_matches(code: str, code_hash: str, settings: Settings) -> bool:
-    return hmac.compare_digest(hash_verification_code(code, settings), code_hash)
+def keyed_hash(value: str, settings: Settings) -> str:
+    """HMAC-SHA256 with a server secret, for short-lived secrets (codes, registration tokens).
+
+    A leaked DB row can't be brute-forced offline without the server key
+    (a code has only 10^6 values).
+    """
+    return hmac.new(settings.jwt_secret_key.encode(), value.encode(), hashlib.sha256).hexdigest()
+
+
+def keyed_hash_matches(value: str, expected_hash: str, settings: Settings) -> bool:
+    return hmac.compare_digest(keyed_hash(value, settings), expected_hash)

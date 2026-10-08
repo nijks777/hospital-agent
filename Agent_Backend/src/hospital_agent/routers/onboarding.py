@@ -14,6 +14,7 @@ from hospital_agent.services.onboarding_service import (
     CodeExpiredError,
     EmailAlreadyRegisteredError,
     InvalidCodeError,
+    RegistrationSupersededError,
     ResendTooSoonError,
     TooManyAttemptsError,
 )
@@ -41,7 +42,7 @@ async def register(
     body: RegisterHospitalRequest, onboarding: OnboardingServiceDep
 ) -> RegisterHospitalResponse:
     try:
-        hospital = await onboarding.register(body)
+        hospital, token = await onboarding.register(body)
     except EmailAlreadyRegisteredError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -52,15 +53,22 @@ async def register(
     except EmailDeliveryError:
         logger.exception("Verification email failed during registration")
         raise _email_failed from None
-    return RegisterHospitalResponse(hospital_id=hospital.id, email=body.email)
+    return RegisterHospitalResponse(
+        hospital_id=hospital.id, email=body.email, registration_token=token
+    )
 
 
 @router.post("/verify-email", status_code=status.HTTP_204_NO_CONTENT)
 async def verify_email(body: VerifyEmailRequest, onboarding: OnboardingServiceDep) -> None:
     try:
-        await onboarding.verify_email(body.email, body.code)
+        await onboarding.verify_email(body.email, body.code, body.registration_token)
     except InvalidCodeError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code is incorrect.") from None
+    except RegistrationSupersededError:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This email was registered again from another device. Start the registration again.",
+        ) from None
     except CodeExpiredError:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "This code has expired. Send a new code."
@@ -74,7 +82,7 @@ async def verify_email(body: VerifyEmailRequest, onboarding: OnboardingServiceDe
 @router.post("/resend-code", status_code=status.HTTP_202_ACCEPTED)
 async def resend_code(body: ResendCodeRequest, onboarding: OnboardingServiceDep) -> None:
     try:
-        await onboarding.resend_code(body.email)
+        await onboarding.resend_code(body.email, body.registration_token)
     except ResendTooSoonError as exc:
         raise _too_soon(exc) from None
     except EmailDeliveryError:

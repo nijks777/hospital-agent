@@ -29,13 +29,24 @@ class Harness:
         app = create_app()
         app.dependency_overrides[get_onboarding_service] = lambda: service
         self.client = TestClient(app)
+        self.token = ""  # registration token of the most recent successful register()
 
-    def register(self) -> None:
-        assert self.client.post("/onboarding/register", json=FORM).status_code == 201
+    def register(self, **overrides: str) -> str:
+        response = self.client.post("/onboarding/register", json={**FORM, **overrides})
+        assert response.status_code == 201
+        self.token = response.json()["registration_token"]
+        return self.token
 
-    def verify(self, code: str) -> int:
+    def verify(self, code: str, token: str | None = None) -> int:
         return self.client.post(
-            "/onboarding/verify-email", json={"email": FORM["email"], "code": code}
+            "/onboarding/verify-email",
+            json={"email": FORM["email"], "code": code, "registration_token": token or self.token},
+        ).status_code
+
+    def resend(self, token: str | None = None, email: str = FORM["email"]) -> int:
+        return self.client.post(
+            "/onboarding/resend-code",
+            json={"email": email, "registration_token": token or self.token or "x"},
         ).status_code
 
     @property
@@ -123,7 +134,9 @@ def test_resend_is_rate_limited() -> None:
     h = Harness()
     h.register()
 
-    response = h.client.post("/onboarding/resend-code", json={"email": FORM["email"]})
+    response = h.client.post(
+        "/onboarding/resend-code", json={"email": FORM["email"], "registration_token": h.token}
+    )
 
     assert response.status_code == 429
     assert "Retry-After" in response.headers
@@ -135,9 +148,7 @@ def test_resend_after_cooldown_sends_new_code_and_old_one_stops_working() -> Non
     old_code = h.email.last_code()
     h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
 
-    response = h.client.post("/onboarding/resend-code", json={"email": FORM["email"]})
-
-    assert response.status_code == 202
+    assert h.resend() == 202
     assert len(h.email.sent) == 2
     if old_code != h.email.last_code():
         assert h.verify(old_code) == 400
@@ -147,9 +158,7 @@ def test_resend_after_cooldown_sends_new_code_and_old_one_stops_working() -> Non
 def test_resend_for_unknown_email_reveals_nothing() -> None:
     h = Harness()
 
-    response = h.client.post("/onboarding/resend-code", json={"email": "nobody@example.com"})
-
-    assert response.status_code == 202
+    assert h.resend(email="nobody@example.com") == 202
     assert h.email.sent == []
 
 
@@ -171,12 +180,8 @@ def test_unverified_email_can_be_registered_again_after_cooldown() -> None:
     h.register()  # e.g. a squatter who never verifies
     h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
 
-    response = h.client.post(
-        "/onboarding/register",
-        json={**FORM, "hospital_name": "Real Hospital", "password": "x" * 10},
-    )
+    h.register(hospital_name="Real Hospital", password="x" * 10)
 
-    assert response.status_code == 201
     assert len(h.uow.hospitals.rows) == 1 and len(h.uow.users.rows) == 1  # replaced, not duplicated
     assert h.hospital.name == "Real Hospital"
     assert h.verify(h.email.last_code()) == 204  # the inbox owner completes it
@@ -202,3 +207,28 @@ def test_verified_email_cannot_be_registered_again() -> None:
 
     assert response.status_code == 409
     assert h.hospital.status == HospitalStatus.PENDING_REVIEW
+
+
+def test_reregistration_cannot_hijack_a_pending_signup() -> None:
+    """Attacker re-registers the victim's email with their own password. The new code lands in
+    the victim's inbox, but it is bound to the attacker's token, so the victim's browser can't
+    use it — and the attacker never sees it. Nobody ends up verified with the attacker's
+    password."""
+    h = Harness()
+    victim_token = h.register()
+    h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
+    attacker_token = h.register(password="attacker-password")
+    code_in_victims_inbox = h.email.last_code()
+
+    assert h.verify(code_in_victims_inbox, token=victim_token) == 409  # superseded
+    assert h.hospital.status == HospitalStatus.PENDING_VERIFICATION
+    assert h.verify("123456", token=attacker_token) in (400, 409)  # attacker can only guess
+
+
+def test_resend_with_someone_elses_token_sends_nothing() -> None:
+    h = Harness()
+    h.register()
+    h.uow.email_verifications.rows[0].created_at = utcnow() - timedelta(minutes=5)
+
+    assert h.resend(token="not-the-real-token") == 202
+    assert len(h.email.sent) == 1

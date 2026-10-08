@@ -53,20 +53,30 @@ export function OnboardingFlow() {
   const [stage, setStage] = useState<Stage>("details");
   const [email, setEmail] = useState("");
   const [hospitalName, setHospitalName] = useState("");
+  // Proves this browser started the registration; sent back with the code. Kept in memory only.
+  const [registrationToken, setRegistrationToken] = useState("");
 
   if (stage === "details") {
     return (
       <DetailsStep
-        onRegistered={(registeredEmail, name) => {
+        onRegistered={(registeredEmail, name, token) => {
           setEmail(registeredEmail);
           setHospitalName(name);
+          setRegistrationToken(token);
           setStage("verify");
         }}
       />
     );
   }
   if (stage === "verify") {
-    return <VerifyStep email={email} onVerified={() => setStage("done")} />;
+    return (
+      <VerifyStep
+        email={email}
+        registrationToken={registrationToken}
+        onVerified={() => setStage("done")}
+        onRestart={() => setStage("details")}
+      />
+    );
   }
   return (
     <div>
@@ -85,7 +95,11 @@ export function OnboardingFlow() {
   );
 }
 
-function DetailsStep({ onRegistered }: { onRegistered: (email: string, name: string) => void }) {
+function DetailsStep({
+  onRegistered,
+}: {
+  onRegistered: (email: string, name: string, token: string) => void;
+}) {
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -103,7 +117,7 @@ function DetailsStep({ onRegistered }: { onRegistered: (email: string, name: str
     try {
       const { res, data } = await postJson("register", values);
       if (res.ok) {
-        onRegistered(data.email, values.hospital_name);
+        onRegistered(data.email, values.hospital_name, data.registration_token);
         return;
       }
       if (res.status === 422 && Array.isArray(data?.detail)) {
@@ -173,7 +187,18 @@ function DetailsStep({ onRegistered }: { onRegistered: (email: string, name: str
   );
 }
 
-function VerifyStep({ email, onVerified }: { email: string; onVerified: () => void }) {
+function VerifyStep({
+  email,
+  registrationToken,
+  onVerified,
+  onRestart,
+}: {
+  email: string;
+  registrationToken: string;
+  onVerified: () => void;
+  onRestart: () => void;
+}) {
+  const [superseded, setSuperseded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -193,11 +218,16 @@ function VerifyStep({ email, onVerified }: { email: string; onVerified: () => vo
     const code = String(new FormData(event.currentTarget).get("code") ?? "").trim();
 
     try {
-      const { res, data } = await postJson("verify-email", { email, code });
+      const { res, data } = await postJson("verify-email", {
+        email,
+        code,
+        registration_token: registrationToken,
+      });
       if (res.ok) {
         onVerified();
         return;
       }
+      if (res.status === 409) setSuperseded(true);
       setError(
         res.status === 422
           ? "Enter the 6-digit code from the email."
@@ -215,7 +245,10 @@ function VerifyStep({ email, onVerified }: { email: string; onVerified: () => vo
     setError(null);
     setNotice(null);
     try {
-      const { res, data } = await postJson("resend-code", { email });
+      const { res, data } = await postJson("resend-code", {
+        email,
+        registration_token: registrationToken,
+      });
       if (res.ok) {
         setNotice("A new code is on its way. Earlier codes no longer work.");
         setCooldown(RESEND_COOLDOWN_SECONDS);
@@ -264,6 +297,16 @@ function VerifyStep({ email, onVerified }: { email: string; onVerified: () => vo
           {submitting ? "Verifying…" : "Verify email"}
         </button>
       </form>
+
+      {superseded && (
+        <button
+          type="button"
+          onClick={onRestart}
+          className="mt-4 font-semibold text-saline hover:underline"
+        >
+          Start registration again
+        </button>
+      )}
 
       <p className="mt-6 text-sm text-muted">
         Didn&apos;t get it? Check spam, or{" "}

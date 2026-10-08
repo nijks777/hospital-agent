@@ -19,12 +19,16 @@ class RegisterHospitalRequest(BaseModel):
 class RegisterHospitalResponse(BaseModel):
     hospital_id: uuid.UUID
     email: EmailStr
+    # Proves "this browser started the registration". Sent back with the code to verify.
+    registration_token: str
 
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
+    registration_token: str = Field(min_length=1, max_length=128)
     code: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{6}$")]
 
 
 class ResendCodeRequest(BaseModel):
     email: EmailStr
+    registration_token: str = Field(min_length=1, max_length=128)
